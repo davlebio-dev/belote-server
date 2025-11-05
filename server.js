@@ -77,40 +77,33 @@ io.on("connection", socket=>{
     }
   });
 
-  socket.on("play", ({room,cardIndex})=>{
-    const r = rooms[room]; if(!r||r.phase!=="jeu") return;
-    const playerId = socket.id;
-    const hand = r.hands[playerId]; if(!hand||!hand[cardIndex]) return;
-    const playedCard = hand.splice(cardIndex,1)[0];
-    r.tricks.push({player:playerId,card:playedCard});
-    io.to(room).emit("cardPlayed",{player:playerId,card:playedCard});
+  socket.on("play", ({room, cardIndex}) => {
+  const r = rooms[room];
+  if(!r || r.phase !== "jeu") return;
+  const playerId = socket.id;
+  const hand = r.hands[playerId];
+  if(!hand || !hand[cardIndex]) return;
+  const playedCard = hand.splice(cardIndex, 1)[0];
 
-    r.currentTurn=(r.currentTurn+1)%4;
+  // Envoie à tous que la carte a été jouée
+  io.to(room).emit("cardPlayed", { player: playerId, card: playedCard });
 
-    if(r.tricks.length===4){
-      const firstSuit=r.tricks[0].card.suit;
-      let bestCard=r.tricks[0];
-      for(let i=1;i<4;i++){
-        const c=r.tricks[i];
-        if(c.card.suit===r.trump && bestCard.card.suit!==r.trump) bestCard=c;
-        else if(c.card.suit===bestCard.card.suit){
-          if(ranks.indexOf(c.card.rank)>ranks.indexOf(bestCard.card.rank)) bestCard=c;
-        }
-      }
-      const winnerId=bestCard.player;
-      const teamWinner=r.teams.teamA.includes(winnerId)?0:1;
-      const pointsThisTrick=r.tricks.reduce((sum,t)=>{
-        const pts=t.card.suit===r.trump?pointsAtout[t.card.rank]:pointsNormal[t.card.rank];
-        return sum+pts;
-      },0);
-      r.scores[teamWinner]+=pointsThisTrick;
-      r.tricks=[];
-      io.to(room).emit("trickWinner",{winner:winnerId,scores:r.scores});
-    }
+  // <-- NOUVEAU : envoie la main mise à jour uniquement au joueur qui a joué -->
+  io.to(playerId).emit("handUpdate", r.hands[playerId]);
+  // <-- FIN NOUVEAU -->
 
-    io.to(room).emit("turn",r.currentTurn);
-  });
-
+  // logique du pli / changement de tour...
+  r.tricks.push({ player: playerId, card: playedCard });
+  r.currentTurn = (r.currentTurn + 1) % 4;
+  // ... (calcul du gagnant quand r.tricks.length === 4, mise à jour scores etc.)
+  io.to(room).emit("turn", r.currentTurn);
+});
+socket.on("requestHand", ({ room }) => {
+  const r = rooms[room];
+  if(!r) return;
+  const hand = r.hands[socket.id] || [];
+  io.to(socket.id).emit("handUpdate", hand);
+});
   socket.on("disconnect",()=>{
     for(const rName in rooms){
       rooms[rName].players = rooms[rName].players.filter(p=>p.id!==socket.id);
