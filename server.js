@@ -44,30 +44,35 @@ io.on("connection", socket=>{
     }
   });
 
-  socket.on("setTeams", ({room,teamA,teamB})=>{
-    const r = rooms[room]; if(!r) return;
-    r.teams={teamA,teamB};
-	// envoi aux clients la composition des équipes (avec name/id)
-io.to(room).emit("teamsSet", {
-  teamA: r.players.filter(p => teamA.includes(p.id)).map(p => ({ id: p.id, name: p.name })),
-  teamB: r.players.filter(p => teamB.includes(p.id)).map(p => ({ id: p.id, name: p.name }))
+ socket.on("setTeams", ({room,teamA,teamB})=>{
+  const r = rooms[room]; if(!r) return;
+  // stocker les ids des équipes comme avant
+  r.teams = { teamA, teamB };
+  r.phase = "choixAtout";
+  r.phaseAtoutTour = 1; // s'assurer que le 1er tour est actif
+
+  // -> ENVOI teamsSet : on envoie la composition complète (id + name) aux clients
+  io.to(room).emit("teamsSet", {
+    teamA: r.players.filter(p => teamA.includes(p.id)).map(p => ({ id: p.id, name: p.name })),
+    teamB: r.players.filter(p => teamB.includes(p.id)).map(p => ({ id: p.id, name: p.name }))
+  });
+
+  // Créer et distribuer le deck
+  r.deck = createDeck();
+  r.players.forEach((p,i)=> r.hands[p.id] = r.deck.slice(i*5,i*5+5));
+  r.turnedCard = r.deck[20];
+
+  // envoyer mains privées puis start (si tu préfères tu peux envoyer start après teamsSet)
+  r.players.forEach(p => io.to(p.id).emit("hand", r.hands[p.id]));
+
+  io.to(room).emit("start", {
+    hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]])),
+    turnedCard: r.turnedCard,
+    teams: r.teams,
+    currentTurn: 0
+  });
 });
 
-    r.phase="choixAtout";
-	r.phaseAtoutTour = 1; // <-- AJOUT: on démarre au tour d'atout n°1
-
-    // Créer et distribuer le deck
-    r.deck=createDeck();
-    r.players.forEach((p,i)=> r.hands[p.id] = r.deck.slice(i*5,i*5+5));
-    r.turnedCard=r.deck[20];
-
-    io.to(room).emit("start", {
-      hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]])),
-      turnedCard: r.turnedCard,
-      teams: r.teams,
-      currentTurn: 0
-    });
-  });
 
   // ---- Remplacement du handler "bid" : gestion en 2 tours ----
 socket.on("bid", ({room,take,color})=>{
