@@ -74,51 +74,72 @@ io.on("connection", socket=>{
 });
 
 
-  // ---- Remplacement du handler "bid" : gestion en 2 tours ----
-socket.on("bid", ({room,take,color})=>{
-  const r = rooms[room]; if(!r) return;
-
-  // sécurité : si phase pas de choix d'atout, on ignore
-  if(r.phase !== "choixAtout" && r.phase !== "jeu"){
+// ---- Remplacement robuste du handler "bid" ----
+socket.on("bid", ({room, take, color}) => {
+  const r = rooms[room];
+  if(!r) return;
+  // sécurité
+  if(r.phase !== "choixAtout" && r.phase !== "jeu") {
     return socket.emit("error", "Enchères non disponibles");
   }
 
-  // Si joueur passe (take=false)
+  const actorId = socket.id;
+
+  // Si le joueur passe
   if(!take){
-    // avancer au joueur suivant
+    // on avance le tour
     r.currentTurn = (r.currentTurn + 1) % 4;
 
-    // Si on était au premier tour et qu'on a fait un tour complet (retour au joueur 0),
-    // on passe au second tour (les joueurs pourront choisir une autre couleur)
-    if(r.phaseAtoutTour === 1 && r.currentTurn === (r.dealerIndex + 1) % 4){
-      r.phaseAtoutTour = 2;
-      io.to(room).emit("nextBid", { currentTurn: r.currentTurn, tour: 2, turnedCard: r.turnedCard });
-      return;
+    // Emission pour informer tout le monde que ce joueur a passé et quel est le prochain
+    io.to(room).emit("nextBid", {
+      type: "pass",
+      playerId: actorId,
+      nextTurn: r.currentTurn,
+      tour: r.phaseAtoutTour,
+      turnedCard: r.turnedCard
+    });
+
+    // Si on a complété un tour complet au 1er tour -> passer au 2e tour
+    // On considère qu'un "tour complet" revient au joueur qui a commencé l'enchère (ici initial currentTurn)
+    if(r.phaseAtoutTour === 1){
+      // détection simple : si r.bidStartIndex exists use it; else set it when first bid round starts
+      if(typeof r.bidStartIndex === "undefined") r.bidStartIndex = (r.dealerIndex + 1) % 4;
+      // si nextTurn equals bidStartIndex => tour complet
+      if(r.currentTurn === r.bidStartIndex){
+        r.phaseAtoutTour = 2;
+        // notify second round start
+        io.to(room).emit("nextBid", {
+          type: "tour2start",
+          playerId: null,
+          nextTurn: r.currentTurn,
+          tour: 2,
+          turnedCard: r.turnedCard
+        });
+      }
+    } else if(r.phaseAtoutTour === 2){
+      // second tour: if full round completed -> redeal
+      if(typeof r.bidStartIndex === "undefined") r.bidStartIndex = (r.dealerIndex + 1) % 4;
+      if(r.currentTurn === r.bidStartIndex){
+        // redeal
+        r.deck = createDeck();
+        r.players.forEach((p,i)=> r.hands[p.id] = r.deck.slice(i*5,i*5+5));
+        r.turnedCard = r.deck[20];
+        r.phaseAtoutTour = 1;
+        // clear bidStartIndex for next time
+        delete r.bidStartIndex;
+        io.to(room).emit("redeal", {
+          reason: "nobody_took",
+          hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]])),
+          turnedCard: r.turnedCard
+        });
+      }
     }
 
-    // Si on est au second tour et qu'on a fait un tour complet -> personne n'a pris -> redeal
-    if(r.phaseAtoutTour === 2 && r.currentTurn === (r.dealerIndex + 1) % 4){
-      // Redistribution complète : recréer deck et redonner 5 cartes + nouvelle carte retournée
-      r.deck = createDeck();
-      r.players.forEach((p,i)=> r.hands[p.id] = r.deck.slice(i*5,i*5+5));
-      r.turnedCard = r.deck[20];
-      r.phaseAtoutTour = 1; // recommencer cycle si besoin
-      io.to(room).emit("redeal", {
-        hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]])),
-        turnedCard: r.turnedCard
-      });
-      return;
-    }
-
-    // sinon on signale au room que l'enchère continue
-    io.to(room).emit("nextBid", { currentTurn: r.currentTurn, tour: r.phaseAtoutTour, turnedCard: r.turnedCard });
     return;
   }
 
-  // Si joueur prend (take=true)
-  // Deux possibilités :
-  //  - si phaseAtoutTour === 1 => on n'autorise que la couleur de la carte retournée
-  //  - si phaseAtoutTour === 2 => on autorise toute couleur sauf la couleur retournée
+  // Si le joueur prend (take === true)
+  // contrôles sur le tour
   if(r.phaseAtoutTour === 1){
     // n'autorise que la couleur retournée
     if(color !== r.turnedCard.suit){
@@ -127,20 +148,18 @@ socket.on("bid", ({room,take,color})=>{
     }
   } else if(r.phaseAtoutTour === 2){
     if(color === r.turnedCard.suit){
-      socket.emit("error","Au second tour vous ne pouvez pas reprendre la même couleur retournée");
+      socket.emit("error","Au second tour vous ne pouvez pas choisir la couleur retournée");
       return;
     }
   }
 
-  // Acceptation de la prise
+  // Acceptation : définir l'atout et passer en jeu
   r.trump = color;
   r.phase = "jeu";
-
-  // Distribution des 3 cartes restantes (pool final)
-  // on utilise la même logique que précédemment : 3 cartes par joueur parmi la tranche 20..end
+  // distribuer les 3 cartes restantes
   r.players.forEach((p,i)=> r.hands[p.id].push(...r.deck.slice(20+i*3,20+i*3+3)));
 
-  // Détecter belote (K+Q d'atout) pour chaque joueur (optionnel)
+  // préparer belote detection (facultatif)
   r.beloteCandidates = {};
   r.players.forEach(p=>{
     const h = r.hands[p.id] || [];
@@ -149,14 +168,18 @@ socket.on("bid", ({room,take,color})=>{
     r.beloteCandidates[p.id] = { hasBoth: hasK && hasQ, declared:false, firstPlayed:null };
   });
 
-  // Envoyer mains mises à jour et annonce d'atout
-  r.players.forEach(p => io.to(p.id).emit("hand", r.hands[p.id]));
-  io.to(room).emit("trumpChosen", { trump: r.trump, hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]])) });
+  // informer la salle que l'atout a été choisi
+  io.to(room).emit("trumpChosen", {
+    playerId: actorId,
+    trump: r.trump,
+    hands: Object.fromEntries(r.players.map(p=>[p.id,r.hands[p.id]]))
+  });
 
-  // On démarre le jeu : set currentPlayer (généralement joueur après le donneur)
+  // débuter le jeu : set current player (le joueur après le donneur)
   r.currentTurn = (r.dealerIndex + 1) % 4;
   io.to(room).emit("turn", r.currentTurn);
 });
+
 
 
   socket.on("play", ({room,cardIndex})=>{
