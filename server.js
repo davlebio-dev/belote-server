@@ -47,6 +47,10 @@ io.on("connection", socket=>{
   socket.on("setTeams", ({room,teamA,teamB})=>{
     const r = rooms[room]; if(!r) return;
     r.teams={teamA,teamB};
+	io.to(room).emit("teamsSet", {
+  teamA: r.players.filter(p => teamA.includes(p.id)),
+  teamB: r.players.filter(p => teamB.includes(p.id))
+});
     r.phase="choixAtout";
 
     // Créer et distribuer le deck
